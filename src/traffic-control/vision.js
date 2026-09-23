@@ -447,12 +447,15 @@ export function createPlateReader({ seed = 7 } = {}) {
       const letters = 'TN';
       const digits = String(Math.abs(hashString(trackId)) % 10000).padStart(4, '0');
       const body = `${letters}${digits}`;
+      // Jitter scales with the frame's unreliability rather than being a flat
+      // subtraction: a clean frame reads consistently, a poor frame varies
+      // wildly. A constant penalty would mean quality 1.0 could still fall
+      // below the readability floor, which would make "a good frame reads" a
+      // matter of luck rather than of frame quality.
       const characters = [...body].map((char, index) => ({
         char,
-        // Quality drives per-character confidence so a poor frame really does
-        // produce an unreadable plate instead of a lucky guess.
         confidence: clamp(
-          quality - deterministicJitter(seed, trackId, `char:${index}`) * 0.2,
+          quality - deterministicJitter(seed, trackId, `char:${index}`) * 0.2 * (1 - quality),
           0,
           1,
         ),
@@ -460,7 +463,7 @@ export function createPlateReader({ seed = 7 } = {}) {
       return plateResultFromCharacters({
         characters,
         confidence: clamp(
-          quality - deterministicJitter(seed, trackId, 'overall') * 0.15,
+          quality - deterministicJitter(seed, trackId, 'overall') * 0.15 * (1 - quality),
           0,
           1,
         ),

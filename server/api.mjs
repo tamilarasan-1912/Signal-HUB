@@ -73,6 +73,16 @@ function asFlag(value, fallback = false) {
 }
 
 /**
+ * Clamp a numeric input to a 0–1 range, rejecting non-finite values.
+ * @param {unknown} value @returns {number}
+ */
+function clamp01(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(1, Math.max(0, number));
+}
+
+/**
  * Build the API.
  *
  * @param {object} deps
@@ -544,6 +554,53 @@ export function createApi({ engine, sessions, runtime = {}, now = () => Date.now
       pattern: /^\/api\/enforcement\/rules$/,
       capability: CAPABILITIES.viewViolations,
       handler: () => ({ status: 200, body: engine.getRules() }),
+    },
+    {
+      /**
+       * Run one plate through the configured reader adapter.
+       *
+       * This is the seam a real ANPR vendor plugs into: the caller supplies a
+       * frame reference and a quality, and the adapter returns a confidence
+       * rather than a bare string. A read below the confidence floor comes back
+       * as an explicit unreadable verdict with no characters, which is the
+       * behaviour that stops an invented plate entering an enforcement record.
+       */
+      method: 'POST',
+      pattern: /^\/api\/enforcement\/plate$/,
+      capability: CAPABILITIES.viewPlate,
+      handler: ({ body }) => {
+        const input = body && typeof body === 'object' ? body : {};
+        const reader = engine.plate.current();
+        if (!reader) {
+          return { status: 503, body: { error: 'No plate reader adapter is configured' } };
+        }
+        const result = engine.plate.read({
+          trackId: typeof input.trackId === 'string' ? input.trackId : 'TRK-TEST-0001',
+          quality: typeof input.quality === 'number' ? clamp01(input.quality) : 0.95,
+          cameraId: typeof input.cameraId === 'string' ? input.cameraId : null,
+          jurisdiction: typeof input.jurisdiction === 'string' ? input.jurisdiction : '',
+          frameRef: typeof input.frameRef === 'string' ? input.frameRef : null,
+          at: Date.now(),
+        });
+        if (!result) {
+          return { status: 503, body: { error: 'The plate reader returned no result' } };
+        }
+        // The response carries the adapter's own verdict verbatim: `plate` is
+        // null and `display` is the unreadable marker when the read failed.
+        return {
+          status: 200,
+          body: {
+            plate: result.plate,
+            display: result.display,
+            text: result.plate,
+            confidence: result.confidence,
+            unreadable: !result.readable,
+            characters: result.characters,
+            mode: result.mode,
+            adapter: { id: reader.id, label: reader.label },
+          },
+        };
+      },
     },
 
     // ─── Simulation ────────────────────────────────────────────────────────

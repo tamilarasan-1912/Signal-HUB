@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Signal-HUB — City Traffic Intelligence &amp; Control</title>
+  <link rel="stylesheet" href="/src/client/styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="shell">
+    <header id="top-bar">
+      <div class="brand">
+        SIGNAL<span>·</span>HUB
+        <small>Traffic Intelligence &amp; Control</small>
+      </div>
+      <div id="top-status" aria-live="polite"></div>
+      <div class="top-right">
+        <span id="clock" aria-label="Current time">--:--:--</span>
+        <span id="mode-label">MODE —</span>
+        <button class="btn primary" type="button" id="sign-in">Sign in</button>
+        <button class="btn" type="button" id="sign-out">Sign out</button>
+      </div>
+    </header>
+
+    <aside id="nav-panel">
+      <nav id="nav-list" aria-label="Command center sections"></nav>
+      <div class="nav-block">
+        <h4>Map layers</h4>
+        <div id="layer-row"></div>
+      </div>
+    </aside>
+
+    <main id="map-area">
+      <div id="map-canvas" role="application" aria-label="3D city traffic map"></div>
+      <div id="alert-host" aria-live="assertive"></div>
+      <div class="map-legend" aria-label="Map legend">
+        <div class="legend-row"><span class="legend-swatch swatch-free"></span>● FLOWING — free flow</div>
+        <div class="legend-row"><span class="legend-swatch swatch-slow"></span>▲ SLOWING</div>
+        <div class="legend-row"><span class="legend-swatch swatch-congested"></span>◆ CONGESTED</div>
+        <div class="legend-row"><span class="legend-swatch swatch-jam"></span>■ SEVERE</div>
+        <div class="legend-row"><span class="legend-swatch swatch-emergency"></span>✚ EMERGENCY CORRIDOR</div>
+        <div class="legend-row"><span class="legend-swatch swatch-incident"></span>⚠ INCIDENT</div>
+        <div class="legend-row"><span class="legend-swatch swatch-offline"></span>○ UNAVAILABLE</div>
+      </div>
+    </main>
+
+    <aside id="side-panel">
+      <div id="page-host"></div>
+      <div id="inspector-host"></div>
+    </aside>
+
+    <section id="timeline-host" aria-label="Live event stream"></section>
+  </div>
+
+  <div id="modal-host"></div>
+
+  <script type="module">
+    import { mountCommandCenter } from '/src/client/app.js';
+    mountCommandCenter({
+      root: document,
+      cesiumIonToken: import.meta.env?.CESIUM_ION_TOKEN || '',
+    }).catch((error) => {
+      console.error('Signal-HUB failed to start:', error);
+      document.getElementById('alert-host').innerHTML =
+        '<div class="alert error"><strong>STARTUP FAILURE</strong><span></span></div>';
+      document.querySelector('#alert-host .alert span').textContent = String(error?.message || error);
+    });
+  </script>
+</body>
+</html>
