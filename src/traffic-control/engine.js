@@ -29,6 +29,8 @@ import {
   DATA_MODES,
   DIRECTIONS,
   OPERATING_MODES,
+  OPERATING_MODE_META,
+  OPERATING_MODE_ORDER,
   approachAxis,
 } from './policy.js';
 import { clamp, isFiniteNumber } from './geometry.js';
@@ -62,6 +64,7 @@ import {
   applySignalState,
   createRandom,
   createScenarioRunner,
+  DEMO_SCENARIO,
   generateDemand,
   resolveOperatingMode,
   runSimulationStep,
@@ -140,6 +143,19 @@ export function createTrafficControlEngine({
   let simulationSteps = 0;
   let lastStepAt = null;
   let simulationTimer = null;
+  /** @type {string|null} The scenario most recently run, for the simulation page. */
+  let lastScenario = null;
+  /**
+   * A bounded ring of city summaries, one per control step.
+   *
+   * The analytics view charts this rather than synthesising a trend, so a chart
+   * can only ever show measurements the engine actually took. Bounded so a
+   * long-running session cannot grow without limit.
+   * @type {object[]}
+   */
+  const analyticsSamples = [];
+  /** @const {number} */
+  const ANALYTICS_SAMPLE_CAPACITY = 900;
 
   // A representative camera for each intersection, so an intersection without a
   // configured feed still has a coverage story the detector can be shown
@@ -623,6 +639,337 @@ export function createTrafficControlEngine({
       return network;
     },
 
+    /** @returns {object} The demand model, for the analytics view. */
+    getDemand() {
+      return Object.freeze(Object.fromEntries([...demand.entries()].map(([id, byDir]) => [id, { ...byDir }])));
+    },
+
+    // ── Read-side projections the command center renders ──────────────────
+
+    /**
+     * Signal state for every intersection, flattened for the map layer.
+     * @returns {object[]}
+     */
+    getSignals() {
+      const out = [];
+      for (const [id, controller] of controllers) {
+        const signal = controller.getSignalState();
+        const health = controller.getHealth();
+        const intersection = intersections.get(id);
+        out.push(
+          Object.freeze({
+            intersectionId: id,
+            name: intersection?.name || id,
+            lon: intersection?.lon ?? null,
+            lat: intersection?.lat ?? null,
+            group: signal.group,
+            phase: signal.phase,
+            greenMs: signal.greenMs,
+            cycleMs: signal.cycleMs,
+            states: signal.states,
+            preempted: Boolean(signal.preemption),
+            preemption: signal.preemption || null,
+            health: health.status,
+            label: health.label,
+            // Every phase the simulator can be in is a simulated one: no
+            // hardware is attached, and the readout says so.
+            mode: DATA_MODES.simulated,
+          }),
+        );
+      }
+      return Object.freeze(out);
+    },
+
+    /** @param {string} id @returns {object|null} */
+    getSignal(id) {
+      return engine.getSignals().find((signal) => signal.intersectionId === id) || null;
+    },
+
+    /**
+     * The four-approach readout for one intersection.
+     * @param {string} id
+     * @returns {object[]}
+     */
+    getApproachTable(id) {
+      const intersection = intersections.get(id);
+      if (!intersection) return Object.freeze([]);
+      const signal = controllers.get(id)?.getSignalState() || null;
+      return Object.freeze(
+        DIRECTIONS.map((direction) => {
+          const approach = intersection.approaches[direction];
+          return Object.freeze({
+            direction,
+            axis: approachAxis(direction),
+            roadId: approach.roadId,
+            roadName: approach.roadName,
+            roadClass: approach.roadClass,
+            lanes: approach.lanes,
+            vehicleCount: approach.vehicleCount,
+            queueVehicles: approach.queueVehicles,
+            queueM: approach.queueM,
+            speedMps: approach.speedMps,
+            freeFlowMps: approach.freeFlowMps,
+            congestion: approach.congestion,
+            cameraId: approach.cameraId,
+            signalState: signal?.states?.[direction] ?? 'unknown',
+            phase: signal?.phase ?? 'unknown',
+            greenMs: signal?.greenMs ?? null,
+          });
+        }),
+      );
+    },
+
+    /**
+     * The adaptive recommendation for one intersection, with its reasoning.
+     * @param {string} id
+     * @returns {object|null}
+     */
+    getSignalRecommendation(id) {
+      const intersection = intersections.get(id);
+      if (!intersection) return null;
+      const recommendation = recommendGreenSplit(intersection);
+      if (!recommendation) return null;
+      const signal = controllers.get(id)?.getSignalState() || null;
+      return Object.freeze({
+        ...recommendation,
+        current: {
+          ...recommendation.current,
+          holding: signal?.group ?? null,
+          phase: signal?.phase ?? null,
+        },
+        // Applying a recommendation moves a simulated signal only, never real
+        // hardware, and only in an operating mode that permits it.
+        applicable: operatingMode !== OPERATING_MODES.recommendation,
+        operatingMode,
+      });
+    },
+
+    /**
+     * Describe one intersection's control path for the operator.
+     * @param {string} id @returns {object|null}
+     */
+    describeControl(id) {
+      const controller = controllers.get(id);
+      if (!controller) return null;
+      return Object.freeze({
+        ...describeController(controller),
+        operatingMode,
+        emergencyPreemption: controller.getHealth().preempted,
+        fault: controller.getHealth().fault,
+      });
+    },
+
+    /** @returns {object[]} Operating modes the UI may offer. */
+    getOperatingModes() {
+      return Object.freeze(
+        OPERATING_MODE_ORDER.map((mode) => {
+          const resolved = resolveOperatingMode(mode);
+          return Object.freeze({
+            mode,
+            selected: mode === operatingMode,
+            selectable: !resolved.refused,
+            reason: resolved.reason,
+            label: OPERATING_MODE_META[mode]?.label || mode,
+            detail: OPERATING_MODE_META[mode]?.detail || '',
+          });
+        }),
+      );
+    },
+
+    /**
+     * City-wide traffic readout for the traffic page and analytics.
+     * @returns {object}
+     */
+    getTraffic() {
+      const list = [...intersections.values()];
+      const summary = cityTrafficSummary(list, [...roads.values()]);
+      const roadList = [...roads.values()];
+      const congested = roadList
+        .filter((road) => road.congestion === 'jam')
+        .sort((a, b) => b.queueM - a.queueM)
+        .slice(0, 20);
+      return Object.freeze({
+        summary,
+        congestedRoads: Object.freeze(congested),
+        // The busiest intersections by queue, which is what an operator
+        // triages first.
+        pressureRanking: Object.freeze(
+          list
+            .map((intersection) => ({
+              intersectionId: intersection.id,
+              name: intersection.name,
+              pressure: intersectionPressure(intersection).pressure,
+              reasons: intersectionPressure(intersection).reasons,
+            }))
+            .sort((a, b) => b.pressure - a.pressure)
+            .slice(0, 20),
+        ),
+        mode: summary.mode,
+      });
+    },
+
+    /**
+     * A bounded time series for the analytics charts.
+     *
+     * The series is sampled from the engine's own accumulated observations
+     * rather than synthesised for display: each sample is the city summary as
+     * it stood when that step ran. When no history exists yet the result is an
+     * empty series and the UI says so, instead of drawing an invented trend.
+     * @param {object} [options]
+     * @param {number} [options.windowMinutes=60]
+     * @returns {object}
+     */
+    getAnalytics({ windowMinutes = 60 } = {}) {
+      const cutoff = clock() - windowMinutes * 60_000;
+      const samples = analyticsSamples.filter((sample) => sample.at >= cutoff);
+      const violations = violationEngine.list({ limit: 500, includePlate: false });
+      const incidents = incidentEngine.list({ status: 'open', limit: 500 });
+      const corridors = emergencyEngine.listCorridors();
+      return Object.freeze({
+        windowMinutes,
+        samples: Object.freeze(samples),
+        totals: Object.freeze({
+          violations: violations.length,
+          incidents: incidents.length,
+          corridors: corridors.length,
+          corridorsReleased: corridors.filter((corridor) => corridor.status === 'released').length,
+          simulationSteps,
+        }),
+        mode: samples.length ? samples[samples.length - 1].mode : DATA_MODES.unavailable,
+        note: samples.length
+          ? 'Sampled from the live engine state at each simulation step.'
+          : 'No samples yet — start the simulation to accumulate history.',
+      });
+    },
+
+    /**
+     * Aggregate platform health, so one degraded provider is visible without
+     * the rest of the command center going dark.
+     * @returns {object}
+     */
+    getSystemHealth() {
+      const signalHealth = engine.getSignalHealth();
+      const camerasSummary = cameraRegistry.summary();
+      const traffic = cityTrafficSummary([...intersections.values()], [...roads.values()]);
+      const detectorsList = detectors.list();
+      const sources = engine.getDataSources().sources;
+      const component = (id, label, status, detail) =>
+        Object.freeze({ id, label, status, detail });
+
+      const components = [
+        component(
+          'network',
+          'Road network',
+          network ? 'HEALTHY' : 'UNAVAILABLE',
+          network ? `${roads.size} roads` : 'no network loaded',
+        ),
+        component(
+          'signals',
+          'Signal controllers',
+          signalHealth.fault > 0
+            ? 'FAULT'
+            : signalHealth.degraded > 0
+              ? 'DEGRADED'
+              : controllers.size
+                ? 'HEALTHY'
+                : 'UNAVAILABLE',
+          `${signalHealth.ok} ok · ${signalHealth.degraded} degraded · ${signalHealth.fault} fault`,
+        ),
+        component(
+          'cameras',
+          'Camera layer',
+          camerasSummary.total === 0
+            ? 'UNAVAILABLE'
+            : camerasSummary.degraded + camerasSummary.unconfigured > 0
+              ? 'DEGRADED'
+              : 'HEALTHY',
+          `${camerasSummary.ok} ok · ${camerasSummary.degraded} degraded`,
+        ),
+        component(
+          'traffic',
+          'Traffic feed',
+          traffic.mode === DATA_MODES.unavailable ? 'UNAVAILABLE' : 'HEALTHY',
+          `mode ${traffic.mode}`,
+        ),
+        component(
+          'vision',
+          'Vision engine',
+          detectorsList.length ? 'HEALTHY' : 'UNAVAILABLE',
+          detectorsList[0]?.label || 'none registered',
+        ),
+        component(
+          'emergency',
+          'Emergency feed',
+          'HEALTHY',
+          `${emergencyEngine.listVehicles().length} vehicles · no dispatch integration`,
+        ),
+        component(
+          'simulation',
+          'Simulation engine',
+          simulationRunning ? 'HEALTHY' : 'DEGRADED',
+          simulationRunning ? `running · step ${simulationSteps}` : 'paused',
+        ),
+        component(
+          'backend',
+          'Command API',
+          'HEALTHY',
+          `pid ${typeof process !== 'undefined' ? process.pid : 'n/a'}`,
+        ),
+      ];
+
+      const rank = { HEALTHY: 0, DEGRADED: 1, FAULT: 2, UNAVAILABLE: 3 };
+      const worst = components.reduce(
+        (acc, item) => (rank[item.status] > rank[acc] ? item.status : acc),
+        'HEALTHY',
+      );
+      return Object.freeze({
+        overall: worst,
+        components: Object.freeze(components),
+        sources,
+        at: clock(),
+      });
+    },
+
+    /**
+     * Current simulation state, for the simulation page readout.
+     * @returns {object}
+     */
+    getSimulationState() {
+      return Object.freeze({
+        running: simulationRunning,
+        steps: simulationSteps,
+        stepSeconds: SIMULATION_STEP_S,
+        seed,
+        lastStepAt,
+        scenario: lastScenario,
+        operatingMode,
+        vehicles: emergencyEngine.listVehicles().length,
+        corridors: emergencyEngine.listCorridors().filter((corridor) => corridor.status !== 'released').length,
+        incidents: incidentEngine.list({ status: 'open' }).length,
+        violations: violationEngine.summary().pending,
+        congestion: cityTrafficSummary([...intersections.values()], [...roads.values()]),
+        mode: DATA_MODES.simulated,
+        at: clock(),
+      });
+    },
+
+    /**
+     * One violation with its evidence, plate gated by the caller.
+     * @param {string} id
+     * @param {object} [options]
+     * @returns {object|null}
+     */
+    getViolation(id, { includePlate = false } = {}) {
+      const violation = violationEngine.get(id);
+      if (!violation) return null;
+      return includePlate ? violation : Object.freeze({ ...violation, plate: null });
+    },
+
+    /** @returns {object[]} Corridors, newest last. */
+    getCorridors() {
+      return emergencyEngine.listCorridors();
+    },
+
     // ── Writes ────────────────────────────────────────────────────────────
 
     /**
@@ -826,6 +1173,56 @@ export function createTrafficControlEngine({
     },
 
     /**
+     * Put a controller into or out of a fault state.
+     *
+     * This is how the simulator reproduces a signal failure for the demo, and
+     * how a real health monitor would mark a controller it had lost contact
+     * with. A faulty controller shows all-red and refuses control verbs until
+     * an operator clears it — it does not self-heal, which is the safe default.
+     * @param {object} options
+     * @param {string} options.intersectionId
+     * @param {boolean} [options.faulted=true]
+     * @param {string} [options.reason]
+     * @param {string} [options.role]
+     * @returns {{ok:boolean, reason:string|null, signal:object|null}}
+     */
+    setSignalFault({ intersectionId, faulted = true, reason = null, role = null } = {}) {
+      const controller = controllers.get(intersectionId);
+      if (!controller) return { ok: false, reason: 'unknown intersection', signal: null };
+      const result = faulted
+        ? controller.setFault(reason || 'signal controller offline')
+        : controller.clearFault();
+      if (result.ok) {
+        audit.record({
+          action: faulted ? 'signals.fault' : 'signals.clear-fault',
+          role,
+          intersectionId,
+          outcome: 'applied',
+          mode: DATA_MODES.simulated,
+          reason: reason || (faulted ? 'fault raised' : 'fault cleared by operator'),
+        });
+        engine._applySignalToIntersection(intersectionId);
+        if (faulted) {
+          const incident = detectSignalFailure(controller.getHealth(), intersectionId);
+          if (incident) incidentEngine.raise(incident);
+        }
+      }
+      return { ok: result.ok, reason: result.reason, signal: result.signal };
+    },
+
+    /**
+     * Subscribe to the engine's event bus.
+     *
+     * The server's SSE stream is fed from here, so a connected operator sees
+     * exactly the events the timeline and audit log do.
+     * @param {Function} listener
+     * @returns {Function} An unsubscribe function.
+     */
+    subscribeToEvents(listener) {
+      return events.subscribe(listener);
+    },
+
+    /**
      * Ask the optimizer for a recommendation, optionally applying it.
      * @param {object} [options]
      * @param {string} [options.intersectionId] - Omit for the whole city.
@@ -921,6 +1318,7 @@ export function createTrafficControlEngine({
       });
       const result = runner.run(id, options);
       if (result.ok) {
+        lastScenario = id;
         audit.record({
           action: `simulation.${id}`,
           role: options.role || null,
@@ -930,6 +1328,123 @@ export function createTrafficControlEngine({
         });
       }
       return Object.freeze({ ...result, meta: SCENARIO_META[id] || null });
+    },
+
+    /**
+     * Run the full end-to-end city demonstration.
+     *
+     * Composes the platform's own scenarios in the documented order rather than
+     * scripting the UI: congestion → adaptive timing → emergency corridor →
+     * preemption → release → violation → review queue. Each stage reports what
+     * it did so the command center's timeline is a record of real engine work,
+     * not an animation that looks like work.
+     *
+     * Everything here is SIMULATED. The method name says "demo" rather than
+     * "control" because no stage touches real infrastructure.
+     * @param {object} [options]
+     * @param {string} [options.role]
+     * @param {number} [options.stepS] - Simulated seconds to advance between stages.
+     * @returns {Promise<object>}
+     */
+    async runFullDemo({ role = null, stepS = 5 } = {}) {
+      if (!network) return { ok: false, reason: 'no network loaded', stages: [] };
+      const stages = [];
+      const record = (stage, detail) => stages.push(Object.freeze({ stage, ...detail }));
+
+      // 1–2. Load a corridor until it queues.
+      const jam = engine.runScenario('traffic-jam', { role });
+      engine.stepSimulation({ stepS });
+      record('traffic-jam', {
+        ok: jam.ok,
+        label: 'Traffic loaded on the busiest corridor',
+        intersections: jam.result?.intersections || [],
+      });
+
+      // 3. Adaptive optimizer revises the corridor timing.
+      const optimised = engine.optimize({ apply: true, role });
+      record('optimize', {
+        ok: true,
+        label: 'Adaptive optimizer revised corridor timing',
+        applied: optimised.filter((entry) => entry.applied).length,
+        recommendations: optimised.length,
+      });
+
+      // 4. Let the revised timing take effect before the emergency run.
+      engine.stepSimulation({ stepS });
+      engine.stepSimulation({ stepS });
+
+      // 5. Emergency vehicle appears, corridor planned, signals preempted.
+      const ambulance = engine.runScenario('ambulance', { role });
+      record('ambulance', {
+        ok: ambulance.ok,
+        label: 'Ambulance detected and corridor planned',
+        vehicleId: ambulance.result?.vehicle?.id || null,
+        corridorId: ambulance.result?.corridor?.id || null,
+        intersections: ambulance.result?.corridor?.intersectionIds || [],
+      });
+
+      // 6. Drive the vehicle along the corridor so preemption actually happens
+      //    and the vehicle actually passes, rather than being asserted.
+      const advance = [];
+      for (let i = 0; i < 12; i += 1) {
+        engine.stepSimulation({ stepS });
+        advance.push(...engine.advanceEmergencyVehicles(stepS));
+      }
+      record('corridor-run', {
+        ok: true,
+        label: 'Corridor preempted in simulation and vehicle advanced',
+        advances: advance.length,
+        preemptions: emergencyEngine.listPreemptions().length,
+      });
+
+      // 7. Release and hand control back to the adaptive loop.
+      const corridors = emergencyEngine.listCorridors();
+      const open = corridors.filter((corridor) => corridor.status !== 'released');
+      const released = [];
+      for (const corridor of open) {
+        released.push(engine.releaseCorridor({ corridorId: corridor.id, role }));
+      }
+      record('release', {
+        ok: true,
+        label: 'Corridor released; normal adaptive control restored',
+        released: released.length,
+      });
+
+      // 8. Violation, evidence and plate pipeline, then the review queue.
+      const violation = engine.runScenario('red-light-violation', { role });
+      const pending = violationEngine.summary().pending;
+      record('violation', {
+        ok: violation.ok,
+        label: 'Red-light violation detected and queued for review',
+        violationId: violation.result?.violation?.id || violation.result?.violationId || null,
+        pending,
+      });
+
+      engine.stepSimulation({ stepS });
+
+      audit.record({
+        action: 'simulation.full-demo',
+        role,
+        outcome: 'applied',
+        mode: DATA_MODES.simulated,
+        reason: `full city demo completed — ${stages.length} stages`,
+      });
+      events.publish({
+        category: 'system',
+        type: 'demo-complete',
+        severity: SEVERITY.notice,
+        message: 'FULL CITY DEMO COMPLETE — all stages SIMULATED',
+        mode: DATA_MODES.simulated,
+        detail: { stages: stages.length },
+      });
+
+      return Object.freeze({
+        ok: true,
+        stages: Object.freeze(stages),
+        demoDefinition: DEMO_SCENARIO,
+        mode: DATA_MODES.simulated,
+        at: clock(),
+      });
     },
 
     /**
@@ -992,7 +1507,32 @@ export function createTrafficControlEngine({
       // Controllers keep running on their own timers; re-apply their phase so
       // the intersection's reported lamps never lag the controller.
       for (const id of controllers.keys()) engine._applySignalToIntersection(id);
+      engine._sampleAnalytics();
       return Object.freeze({ ...summary, steps: simulationSteps, at: lastStepAt });
+    },
+
+    /**
+     * Record one analytics sample. Called after each control step so the
+     * analytics view charts real engine state rather than an invented curve.
+     */
+    _sampleAnalytics() {
+      const summary = cityTrafficSummary([...intersections.values()], [...roads.values()]);
+      analyticsSamples.push(
+        Object.freeze({
+          at: lastStepAt,
+          step: simulationSteps,
+          congestedRoads: summary.congestedRoads,
+          slowRoads: summary.slowRoads,
+          freeRoads: summary.freeRoads,
+          totalQueueM: summary.totalQueueM,
+          meanSpeedMps: summary.meanSpeedMps,
+          worstPressure: summary.worstPressure,
+          mode: summary.mode,
+        }),
+      );
+      if (analyticsSamples.length > ANALYTICS_SAMPLE_CAPACITY) {
+        analyticsSamples.splice(0, analyticsSamples.length - ANALYTICS_SAMPLE_CAPACITY);
+      }
     },
 
     /** @returns {boolean} */
@@ -1285,6 +1825,8 @@ export function createTrafficControlEngine({
       });
       simulationSteps = 0;
       lastStepAt = null;
+      lastScenario = null;
+      analyticsSamples.length = 0;
       events.publish({
         category: 'system',
         type: 'simulation-reset',

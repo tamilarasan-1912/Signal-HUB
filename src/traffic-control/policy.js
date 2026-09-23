@@ -106,6 +106,26 @@ export const OPERATING_MODE_ORDER = Object.freeze([
 /** @const {string} Default mode for a fresh prototype session. */
 export const DEFAULT_OPERATING_MODE = OPERATING_MODES.simulation;
 
+/**
+ * Operator-facing copy for each operating mode, so the UI explains what a mode
+ * means rather than offering an unexplained toggle.
+ * @const {Object<string,{label:string,detail:string}>}
+ */
+export const OPERATING_MODE_META = Object.freeze({
+  recommendation: Object.freeze({
+    label: 'Recommendation only',
+    detail: 'The optimizer proposes timing; no control command is applied anywhere.',
+  }),
+  simulation: Object.freeze({
+    label: 'Simulation',
+    detail: 'Control commands drive the built-in signal simulator. No hardware is attached.',
+  }),
+  'authorized-control': Object.freeze({
+    label: 'Authorized control',
+    detail: 'Would drive a real controller. Refused unless an authorized integration is configured.',
+  }),
+});
+
 // ─── Signal timing ─────────────────────────────────────────────────────────
 
 /** @const {string[]} Cardinal approach directions, in phase-pair order. */
