@@ -50,6 +50,7 @@ import {
   buildRoutingGraph,
   createEmergencyEngine,
   fuseEmergencyDetection,
+  approachStatus,
 } from './emergency.js';
 import {
   createAuditLog,
@@ -58,7 +59,12 @@ import {
   SEVERITY,
 } from './events.js';
 import { createIncidentEngine, detectSignalFailure } from './incidents.js';
-import { createViolationEngine, createRuleSet, DEFAULT_RULES } from './violations.js';
+import {
+  createViolationEngine,
+  createRuleSet,
+  DEFAULT_RULES,
+  enforcedSignalStates,
+} from './violations.js';
 import { createCameraRegistry } from './cameras.js';
 import {
   applySignalState,
@@ -522,6 +528,9 @@ export function createTrafficControlEngine({
       return Object.freeze({
         rules: violationEngine.rules.list(),
         automatedEnforcement: violationEngine.summary().automatedEnforcement,
+        // Which signal states can support each claim, so the UI can explain why
+        // a crossing did or did not qualify rather than only showing the verdict.
+        enforcedSignalStates: enforcedSignalStates(),
         engines: Object.freeze({
           detectors: detectors.list(),
           plateReaders: plateReaders.list(),
@@ -965,11 +974,6 @@ export function createTrafficControlEngine({
       return includePlate ? violation : Object.freeze({ ...violation, plate: null });
     },
 
-    /** @returns {object[]} Corridors, newest last. */
-    getCorridors() {
-      return emergencyEngine.listCorridors();
-    },
-
     // ── Writes ────────────────────────────────────────────────────────────
 
     /**
@@ -1383,18 +1387,45 @@ export function createTrafficControlEngine({
         intersections: ambulance.result?.corridor?.intersectionIds || [],
       });
 
-      // 6. Drive the vehicle along the corridor so preemption actually happens
-      //    and the vehicle actually passes, rather than being asserted.
+      // 6. Drive the vehicle along the corridor and preempt each intersection
+      //    as the vehicle actually reaches it. Preemption is requested from
+      //    proximity, not asserted up front, so the log below reflects what the
+      //    engine really did. The loop is bounded, and stops early once every
+      //    corridor has arrived or been released.
       const advance = [];
-      for (let i = 0; i < 12; i += 1) {
+      const preempted = [];
+      const maxSteps = 80;
+      for (let i = 0; i < maxSteps; i += 1) {
         engine.stepSimulation({ stepS });
         advance.push(...engine.advanceEmergencyVehicles(stepS));
+        for (const corridor of emergencyEngine.listCorridors()) {
+          if (corridor.status === 'released') continue;
+          const vehicle = emergencyEngine.getVehicle(corridor.vehicleId);
+          if (!vehicle) continue;
+          for (const upcoming of emergencyEngine.upcomingIntersections(corridor.id)) {
+            const target = intersections.get(upcoming.intersectionId);
+            if (!target) continue;
+            if (!approachStatus(vehicle, target).approaching) continue;
+            const result = engine.preemptIntersection({
+              corridorId: corridor.id,
+              intersectionId: upcoming.intersectionId,
+              role,
+            });
+            if (result.ok) preempted.push(result.request);
+          }
+        }
+        const stillMoving = emergencyEngine
+          .listVehicles()
+          .some((vehicle) => vehicle.corridor && vehicle.status !== 'cleared' && vehicle.status !== 'arrived');
+        if (!stillMoving) break;
       }
       record('corridor-run', {
-        ok: true,
+        ok: preempted.length > 0,
         label: 'Corridor preempted in simulation and vehicle advanced',
         advances: advance.length,
-        preemptions: emergencyEngine.listPreemptions().length,
+        preemptions: preempted.length,
+        preemptedIntersections: preempted.map((request) => request.intersectionId),
+        vehicleStatus: emergencyEngine.listVehicles().map((vehicle) => vehicle.status),
       });
 
       // 7. Release and hand control back to the adaptive loop.

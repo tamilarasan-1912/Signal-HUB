@@ -24,9 +24,9 @@
     "start": "node server/index.mjs",
     "test": "node scripts/run-tests.mjs",
     "test:core": "node --test src/traffic-control/*.test.mjs",
-    "test:server": "node --test server/**/*.test.mjs",
-    "test:client": "node --test src/client/**/*.test.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "test:server": "node --test server/*.test.mjs",
+    "test:e2e": "node scripts/run-tests.mjs --browser",
+    "verify:map": "node scripts/verify-map.mjs"
   },
   "dependencies": {
     "cesium": "^1.124.0",

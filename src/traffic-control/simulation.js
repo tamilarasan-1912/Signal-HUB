@@ -261,19 +261,24 @@ export function applySignalState(intersection, signal) {
 }
 
 /**
- * The demonstration scenario: traffic builds on one corridor, the optimizer
- * reacts, an ambulance runs the same corridor, and a red-light violation is
- * logged at a different intersection.
+ * The full demonstration, as a schedule the API returns alongside a run.
  *
- * Expressed as a timeline of steps rather than a script of imperative calls, so
- * what the demo does is readable in one place and each step is individually
- * testable.
+ * The demo builds traffic on one corridor, has the optimizer react, runs an
+ * ambulance down the same corridor, then logs a red-light violation at another
+ * intersection. It is expressed as a timeline rather than a script of
+ * imperative calls, so what the demo does is readable in one place and each
+ * step is individually testable.
+ *
+ * Each `id` is the stage key `runFullDemo` records, so the plan a caller reads
+ * and the stage report it receives name the same things. `scenario` is the
+ * engine scenario that stage runs; `corridor-run` and `release` have none
+ * because they advance and release the corridor the ambulance stage created.
  * @const {object[]}
  */
 export const DEMO_SCENARIO = Object.freeze([
   Object.freeze({
     at: 0,
-    id: 'load-corridor',
+    id: 'traffic-jam',
     label: 'Traffic increases on the east corridor',
     scenario: 'traffic-jam',
   }),
@@ -281,7 +286,8 @@ export const DEMO_SCENARIO = Object.freeze([
     at: 3000,
     id: 'optimize',
     label: 'Adaptive optimizer revises the corridor timing',
-    scenario: 'optimize',
+    // Engine method rather than a runnable scenario.
+    scenario: null,
   }),
   Object.freeze({
     at: 6000,
@@ -291,15 +297,15 @@ export const DEMO_SCENARIO = Object.freeze([
   }),
   Object.freeze({
     at: 9000,
-    id: 'preempt',
-    label: 'Upcoming intersections preempted in simulation',
-    scenario: 'preempt',
+    id: 'corridor-run',
+    label: 'Corridor preempted in simulation and vehicle advanced',
+    scenario: null,
   }),
   Object.freeze({
     at: 12000,
-    id: 'clear',
+    id: 'release',
     label: 'Ambulance passes; normal adaptive control resumes',
-    scenario: 'release',
+    scenario: null,
   }),
   Object.freeze({
     at: 15000,

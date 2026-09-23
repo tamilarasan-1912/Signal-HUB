@@ -18,10 +18,43 @@
  * @module signal-hub/server/api
  */
 
-import { CAPABILITIES } from '../src/traffic-control/policy.js';
+import { CAPABILITIES, REVIEW_STATES } from '../src/traffic-control/policy.js';
 
 /** @const {number} Bounds a JSON body so a malformed request cannot exhaust memory. */
 const MAX_BODY_BYTES = 256 * 1024;
+
+/**
+ * Operator-facing review decisions mapped onto the engine's review states.
+ *
+ * Two vocabularies exist for a reason: "approve" is what a reviewer does, and
+ * `approved` is the record's state. This table is the single place they meet,
+ * and it is built from the engine's own `REVIEW_STATES` so a new state cannot
+ * be added to the domain without appearing here.
+ * @const {Object<string,string>}
+ */
+const REVIEW_DECISIONS = Object.freeze({
+  approve: 'approved',
+  approved: 'approved',
+  accept: 'approved',
+  reject: 'rejected',
+  rejected: 'rejected',
+  decline: 'rejected',
+  escalate: 'escalated',
+  escalated: 'escalated',
+});
+
+/**
+ * Validate that every review state a decision can produce is one the engine
+ * actually knows about. Cheap at module load, and it turns a silent mismatch
+ * (the kind that returns a 400 to every reviewer) into a startup failure.
+ */
+for (const [decision, state] of Object.entries(REVIEW_DECISIONS)) {
+  if (!REVIEW_STATES.includes(state)) {
+    throw new Error(`Review decision "${decision}" maps to unknown state "${state}"`);
+  }
+}
+
+const DECISION_TO_REVIEW_STATE = REVIEW_DECISIONS;
 
 /** @const {Record<string,number>} Per-session request budget. */
 const RATE_LIMIT = Object.freeze({ windowMs: 1000, max: 60 });
@@ -537,16 +570,30 @@ export function createApi({ engine, sessions, runtime = {}, now = () => Date.now
       pattern: /^\/api\/violations\/([^/]+)\/review$/,
       capability: CAPABILITIES.reviewViolations,
       handler: ({ params, body, session }) => {
+        // `decision` is the operator-facing word; the engine's review states
+        // are the vocabulary it validates against, so the two are mapped here
+        // rather than leaking either name into the other layer.
+        const decision = String(body?.decision ?? body?.status ?? '').trim().toLowerCase();
+        const status = DECISION_TO_REVIEW_STATE[decision];
+        if (!status) {
+          return {
+            status: 400,
+            body: {
+              error: `Unsupported review decision "${decision}"`,
+              supported: Object.keys(DECISION_TO_REVIEW_STATE),
+            },
+          };
+        }
         const result = engine.reviewViolation({
           id: params[0],
-          decision: body.decision,
+          status,
           reviewer: session.operator,
           role: session.role,
-          note: body.note,
+          note: body?.note,
         });
         return result.ok
           ? { status: 200, body: { ...result, by: session.operator } }
-          : { status: 400, body: result };
+          : { status: result.reason === 'unknown violation' ? 404 : 400, body: result };
       },
     },
     {

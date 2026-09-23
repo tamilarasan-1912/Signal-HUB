@@ -221,6 +221,7 @@ try {
       automatedEnforcement: rules.automatedEnforcement,
       allRequireReview: (rules.rules || []).every((rule) => rule.reviewRequired !== false),
       redLightFloor: (rules.rules || []).find((rule) => rule.ruleId === 'RED_LIGHT')?.confidenceThreshold ?? null,
+      enforcedStates: rules.enforcedSignalStates || null,
       cleanText: plate.text ?? null,
       cleanConfidence: plate.confidence ?? null,
       degradedUnreadable: degraded.unreadable === true,
@@ -229,6 +230,11 @@ try {
   });
   check(safety.automatedEnforcement === false, 'Automated enforcement is disabled');
   check(safety.allRequireReview, 'Every configured rule requires human review');
+  check(
+    Array.isArray(safety.enforcedStates) && safety.enforcedStates.length === 1 && safety.enforcedStates[0] === 'red',
+    'Only a red signal state can support a red-light claim',
+    JSON.stringify(safety.enforcedStates),
+  );
   check(safety.cleanText?.length >= 5, 'A clean plate reads back', JSON.stringify(safety));
   check(
     safety.degradedUnreadable && !safety.degradedText,

@@ -46,34 +46,6 @@ export const DATA_MODE_ORDER = Object.freeze([
   DATA_MODES.unconfigured,
 ]);
 
-const MODE_LABELS = Object.freeze({
-  live: 'LIVE',
-  simulated: 'SIMULATED',
-  estimated: 'ESTIMATED',
-  unavailable: 'UNAVAILABLE',
-  unconfigured: 'UNCONFIGURED',
-});
-
-/**
- * Uppercase chip text for a composed source, e.g. `LIVE — TomTom`.
- * @param {string} mode - One of {@link DATA_MODES}.
- * @param {string} [source] - Human-readable source name.
- * @returns {string}
- */
-export function dataModeLabel(mode, source) {
-  const word = MODE_LABELS[mode] || 'UNKNOWN';
-  return source ? `${word} — ${source}` : word;
-}
-
-/**
- * Whether a value with this mode may be described to an operator as real.
- * @param {string} mode
- * @returns {boolean}
- */
-export function isMeasured(mode) {
-  return mode === DATA_MODES.live;
-}
-
 // ─── Operating modes ───────────────────────────────────────────────────────
 
 /**

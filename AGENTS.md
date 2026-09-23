@@ -15,9 +15,35 @@ Signal-HUB adds the traffic-control plane on top of it.
 
 ## Repository status
 
-**Early development / architecture phase.** As of this writing the upstream God's
-Eye View checkout is maintained separately; the `src/traffic-control/` module in
-this repository is the first piece landed here and is self-contained.
+**Working prototype.** The traffic-control domain, the command API and the
+command-center frontend are all implemented, tested and runnable:
+
+```bash
+npm install
+npm start          # API + built frontend on http://127.0.0.1:12001
+npm test           # core + server suites
+npm run test:e2e   # browser acceptance run against a running server
+```
+
+The frontend dev server (`npm run dev`, port 12000) proxies `/api` to the API
+process. There are two test layers beyond the unit suites:
+
+- `scripts/e2e.mjs` — puppeteer acceptance over the real app in a real browser.
+  Cesium needs software rendering under headless Chrome (`--use-angle=swiftshader`).
+- `scripts/verify-map.mjs` — reads back the composited map to prove the globe
+  actually renders. The e2e suite only proves the canvas *mounted*; this proves
+  pixels. Note that WebGL `readPixels` returns an empty buffer because Cesium does
+  not set `preserveDrawingBuffer`, so the screenshot is the honest source.
+
+## Layout beyond the domain
+
+| Path | Responsibility |
+| --- | --- |
+| `src/traffic-control/` | the domain — no HTTP, no DOM, no Cesium |
+| `server/` | the command API: routing, capability gating, sessions, stores |
+| `src/client/` | the command center: theme, api, store, map, panels, app |
+| `scripts/` | test runner, e2e acceptance, map verification |
+| `docs/` | architecture and subsystem documentation |
 
 ## Module layout
 
@@ -25,6 +51,10 @@ this repository is the first piece landed here and is self-contained.
 **dependency-free** — every file imports only its siblings and, for tests, Node
 built-ins. That means it can be moved between the standalone Signal-HUB repo and
 the God's Eye View checkout without dragging a build config along.
+
+The layering is one-directional and worth preserving: the domain never imports
+from `server/` or `src/client/`. That is what lets the same engine be unit-tested
+with no server and no browser.
 
 | File | Responsibility |
 | --- | --- |
@@ -54,7 +84,9 @@ documented, and there are tests that fail if the enforcement is removed.
    state the controller can produce. `ALL_RED_MS` is not configurable to zero.
 2. **Data provenance is mandatory.** Every fact carries a mode from `DATA_MODES`
    (`live`/`simulated`/`estimated`/`unavailable`/`unconfigured`). Simulated data
-   must never be presented as live. See `isMeasured()`.
+   must never be presented as live. The client renders a mode as a glyph, a word
+   *and* a colour via `theme.js#modeToken()`, and an unrecognised mode degrades to
+   `UNKNOWN` rather than defaulting to `LIVE`.
 3. **No real-world control.** `OPERATING_MODES.authorizedControl` is refused by
    `resolveOperatingMode()` unless an authorized controller integration is
    configured, which it is not. The UI cannot select it.
@@ -88,9 +120,40 @@ node --test src/traffic-control/*.test.mjs
 - `createVirtualClock()` exists because a signal controller built with real
   `setTimeout` keeps the event loop alive for its whole green interval, which
   makes any network-building test hang ~30s after it has already passed.
-- Test reproduce real bug findings. Two currently-guarded behaviours came from
+- Test reproduce real bug findings. Four currently-guarded behaviours came from
   failing tests rather than review: the tracker counting a newly-created track as
-  a miss, and the plate reader drifting between reads of the same track.
+  a miss, the plate reader drifting between reads of the same track, the plate
+  reader's flat jitter subtraction (a perfect-quality frame could still fall below
+  the readability floor, so readability depended on luck rather than on frame
+  quality), and the API passing `decision`/`reviewer` to an engine expecting
+  `status`/`role` — which returned `400` to every reviewer and made the whole
+  review workflow unreachable over HTTP even though the domain was fine. That
+  last one is why `server/api.test.mjs` drives the review path end to end: a unit
+  test on the engine alone would not have caught it.
+
+## API-layer gotchas
+
+Two mistakes were made once each and are worth not repeating:
+
+- **Do not spread an array into an object.** List endpoints must return
+  `{ violations: [...] }`, not `{ ...list }`, or the numeric keys become the
+  response. The bug is invisible until a client reads `.violations`.
+- **Do not let a scenario's own `ok` decide a stage's `ok`.** `runFullDemo`
+  records each stage as `{ stage, ok, label, ...observations }` via an explicit
+  `record()` call, and `ok` is derived from what the stage observed. Spreading a
+  scenario result into the stage lets the result's `ok` overwrite the stage's,
+  so a failed stage reports success.
+- **Report what a stage measured, not what it hoped.** The `corridor-run` stage
+  of the demo requests preemption from the ambulance's actual proximity to each
+  upcoming intersection and counts the requests the engine accepted. An earlier
+  version advanced the vehicle and then printed the preemption count anyway,
+  which was always 0 while the label claimed the corridor had been preempted; it
+  now reports `ok: false` if nothing was preempted. `simulation.test.mjs` covers
+  the demo for this reason — nothing else did.
+- **Keep `DEMO_SCENARIO` ids equal to the stage keys.** The API returns the plan
+  and the stage report together, so a caller matches them by id. A `scenario:
+  null` entry marks a stage driven by an engine method rather than a runnable
+  scenario, and a test asserts every non-null `scenario` names a real one.
 
 ## Conventions
 
