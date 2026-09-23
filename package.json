@@ -1,0 +1,40 @@
+{
+  "name": "signal-hub",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Signal-HUB — an AI-assisted centralized city traffic intelligence and control platform, built on the God's Eye View geospatial foundation.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "traffic-control",
+    "smart-city",
+    "cesium",
+    "gis",
+    "computer-vision",
+    "emergency-corridor",
+    "signal-control"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server/index.mjs",
+    "test": "node scripts/run-tests.mjs",
+    "test:core": "node --test src/traffic-control/*.test.mjs",
+    "test:server": "node --test server/*.test.mjs",
+    "test:e2e": "node scripts/run-tests.mjs --browser",
+    "verify:map": "node scripts/verify-map.mjs"
+  },
+  "dependencies": {
+    "cesium": "^1.124.0",
+    "hls.js": "^1.7.3"
+  },
+  "devDependencies": {
+    "puppeteer": "^25.10.0",
+    "vite": "^6.0.0",
+    "vite-plugin-cesium": "^1.2.23"
+  }
+}
